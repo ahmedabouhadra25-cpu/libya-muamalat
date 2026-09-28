@@ -8,6 +8,5 @@ export const categories: Category[] = [
   { id: "business", name: "شركات وأعمال" },
   { id: "real-estate", name: "عقارات" },
   { id: "taxes", name: "ضرائب" },
-  { id: "municipalities", name: "بلديات" },
   { id: "other-services", name: "خدمات أخرى" },
 ];

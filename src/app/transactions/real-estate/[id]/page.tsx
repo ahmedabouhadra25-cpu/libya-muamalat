@@ -20,7 +20,7 @@ const TYPE_LABELS: Record<PropertyListing["propertyType"], string> = {
 };
 
 function formatPrice(price: number | null): string {
-  if (price === null) return "السعر غير محدد";
+  if (price === null) return "السعر غير معلن";
   return `${price.toLocaleString("ar-LY")} د.ل`;
 }
 
@@ -28,7 +28,7 @@ export async function generateMetadata(
   props: PageProps<"/transactions/real-estate/[id]">
 ): Promise<Metadata> {
   const { id } = await props.params;
-  const property = getPropertyById(id);
+  const property = await getPropertyById(id);
   return {
     title: property ? `${property.title} — عقارات طرابلس` : "عقار غير موجود",
     description: property?.description ?? "تفاصيل عقار في طرابلس.",
@@ -39,7 +39,7 @@ export default async function PropertyDetailPage(
   props: PageProps<"/transactions/real-estate/[id]">
 ) {
   const { id } = await props.params;
-  const property = getPropertyById(id);
+  const property = await getPropertyById(id);
 
   if (!property) notFound();
 

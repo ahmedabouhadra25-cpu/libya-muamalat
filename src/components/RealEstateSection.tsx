@@ -83,9 +83,9 @@ const inputClass =
  * من جهة العميل: البحث والفلاتر عبر <form method="get"> عادي، متوافق مع
  * نمط بقية المنصة (SearchBox/فلاتر الفئات تعمل بالطريقة نفسها).
  */
-export function RealEstateSection({ searchParams }: RealEstateSectionProps) {
+export async function RealEstateSection({ searchParams }: RealEstateSectionProps) {
   const filters = buildFilters(searchParams);
-  const result = getProperties(filters);
+  const result = await getProperties(filters);
 
   return (
     <div className="mt-6">
@@ -97,7 +97,7 @@ export function RealEstateSection({ searchParams }: RealEstateSectionProps) {
             type="search"
             name="q"
             defaultValue={filters.q ?? ""}
-            placeholder="ابحث عن عقار (العنوان، المنطقة...)"
+            placeholder="ابحث عن عقار (العنوان مكتوب بالإنجليزية في المصدر، مثل: Villa)"
             className={`${inputClass} lg:col-span-2`}
           />
 
@@ -120,7 +120,7 @@ export function RealEstateSection({ searchParams }: RealEstateSectionProps) {
             type="text"
             name="region"
             defaultValue={filters.region ?? ""}
-            placeholder="المنطقة (مثال: عين زارة)"
+            placeholder="المنطقة بالإنجليزية كما في المصدر (مثال: Ain Zara)"
             className={inputClass}
           />
 
@@ -178,7 +178,12 @@ export function RealEstateSection({ searchParams }: RealEstateSectionProps) {
             بحث
           </button>
           {result.lastCollectedLabel && (
-            <p className="text-xs text-zinc-500">آخر تحديث تلقائي: {result.lastCollectedLabel}</p>
+            <p className="text-xs text-zinc-500">
+              آخر تحديث تلقائي: {result.lastCollectedLabel}
+              {result.isStale && (
+                <span className="mr-1 font-medium text-amber-700"> — البيانات قديمة، لم ينجح تحديث جديد بعد</span>
+              )}
+            </p>
           )}
         </div>
       </form>
@@ -193,9 +198,17 @@ export function RealEstateSection({ searchParams }: RealEstateSectionProps) {
             <PropertyCard key={property.id} property={property} />
           ))}
         </div>
-      ) : (
+      ) : result.hasAnyProperties ? (
+        // توجد عقارات في النظام فعليًا، لكن لا شيء يطابق بحث/فلاتر المستخدم الحالية — ليست مشكلة تحميل بيانات.
         <p className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-6 text-center text-zinc-500">
-          لا توجد عقارات مطابقة حاليًا. قد يكون النظام لا يزال يجمع البيانات في الخلفية — حاول مجددًا بعد قليل.
+          لا توجد عقارات تطابق معايير البحث الحالية. جرّب تعديل كلمة البحث أو الفلاتر (المنطقة والبحث
+          النصي يُطابقان النص كما ورد من المصدر بالإنجليزية).
+        </p>
+      ) : (
+        // لا يوجد أي عقار في النظام على الإطلاق بعد — هذه فعليًا مشكلة تحميل/تجميع بيانات حقيقية.
+        <p className="mt-8 rounded-xl border border-amber-200 bg-amber-50 p-6 text-center text-amber-800">
+          تعذّر تحميل بيانات العقارات حاليًا. قد يكون النظام لا يزال يجمع البيانات في الخلفية، أو
+          تعذّر الوصول إلى المصادر الخارجية مؤقتًا — حاول مجددًا بعد قليل.
         </p>
       )}
 

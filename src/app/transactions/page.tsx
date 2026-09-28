@@ -8,6 +8,9 @@ import { TransactionCard } from "@/components/TransactionCard";
 import { RealEstateSection } from "@/components/RealEstateSection";
 import { categories } from "@/lib/categories";
 import { demoTransactions } from "@/lib/demo-transactions";
+import { officialSources } from "@/lib/sources";
+
+const taxAuthoritySource = officialSources.find((source) => source.id === "tax-authority-ly") ?? null;
 
 export const metadata: Metadata = {
   title: "المعاملات — مساعد معاملات ليبيا",
@@ -110,6 +113,24 @@ export default async function TransactionsPage(props: PageProps<"/transactions">
                   {filtered.map((transaction) => (
                     <TransactionCard key={transaction.id} transaction={transaction} />
                   ))}
+                </div>
+              ) : category === "taxes" && taxAuthoritySource ? (
+                <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-6 text-center text-zinc-500">
+                  <p>
+                    لا تتوفر لدينا حاليًا معلومات مؤكَّدة عن إجراءات ضريبية محدَّدة (الرسوم والمستندات
+                    والمواعيد) من مصدر رسمي تم التحقق منه.
+                  </p>
+                  <p className="mt-3">
+                    للاستعلام المباشر، راجع الموقع الرسمي لـ{taxAuthoritySource.name}:{" "}
+                    <a
+                      href={taxAuthoritySource.url}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                      className="font-medium text-teal-700 underline hover:text-teal-800"
+                    >
+                      {taxAuthoritySource.url}
+                    </a>
+                  </p>
                 </div>
               ) : (
                 <p className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-6 text-center text-zinc-500">

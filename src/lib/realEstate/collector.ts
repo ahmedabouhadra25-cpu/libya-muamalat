@@ -19,9 +19,11 @@ import type {
 
 /**
  * المُجمِّع الخلفي (Background Collector) لعقارات طرابلس — server-side فقط،
- * معزول تمامًا عن src/lib/news/* وطبقة AI: لا استيراد في أي اتجاه. يعمل
- * دائمًا بمعزل عن أي طلب مستخدم: getProperties() لا تنتظر أي جلب شبكي أبدًا،
- * فقط تقرأ الكاش الحالي في الذاكرة وتُصفّي/تُرقّم صفحاته.
+ * معزول تمامًا عن src/lib/news/* وطبقة AI: لا استيراد في أي اتجاه. طالما
+ * الذاكرة دافئة (فيها عقارات من دورة سابقة)، getProperties() لا تنتظر أي
+ * جلب شبكي أبدًا. فقط عند ذاكرة فارغة تمامًا (نسخة جديدة — أول طلب بعد نشر
+ * على منصة Serverless مثل Vercel، حيث لا يُضمَن استمرار setInterval أو
+ * الذاكرة بين الطلبات المنفصلة) تنتظر جزءًا سريعًا واحدًا من دورة تحديث.
  *
  * التدفق الحقيقي: مصادر العقارات → تحديث دوري في الخلفية (runCollectionCycle)
  * → كاش في الذاكرة + ملف JSON على القرص كطبقة "قاعدة بيانات" خفيفة تحافظ
@@ -33,7 +35,7 @@ const CACHE_FILE_PATH = join(process.cwd(), ".data", "properties-cache.json");
 let cache: PropertyListing[] = [];
 let lastCollectedAtMs: number | null = null;
 let backgroundStarted = false;
-let collectionInFlight = false;
+let collectionInFlightPromise: Promise<void> | null = null;
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
@@ -236,93 +238,122 @@ function writeCacheToDisk(items: PropertyListing[]): void {
   }
 }
 
-/** دورة تحديث واحدة: تجلب كل المصادر، تُصفّي طرابلس فقط، تُثرّي الجديد بالصورة/الوصف، ثم تدمج مع الكاش القديم. */
-async function runCollectionCycle(): Promise<void> {
-  if (collectionInFlight) return;
-  collectionInFlight = true;
+/**
+ * الجزء السريع القابل للانتظار من دورة التحديث: يجلب صفحات القوائم فقط
+ * (عناوين/أسعار/مناطق/نوع...، بلا صور) من كل المصادر، يُصفّي طرابلس فقط،
+ * يدمج مع الكاش الحالي، ويحفظ فورًا. لا يخترع سعرًا أو رقمًا أبدًا — أي حقل
+ * غير موجود في الصفحة يبقى null كما هو قادم من المصدر.
+ */
+async function fetchAndMergeListings(): Promise<PropertyListing[]> {
+  const previousById = new Map(cache.map((item) => [item.id, item]));
+  const fetches: Promise<{ dealType: PropertyDealType; source: string; html: string | null }>[] = [];
 
-  try {
-    const previousById = new Map(cache.map((item) => [item.id, item]));
-    const fetches: Promise<{ dealType: PropertyDealType; source: string; html: string | null }>[] = [];
-
-    for (const src of PROPERTY_SOURCES) {
-      for (let page = 1; page <= PROPERTY_PAGES_PER_SOURCE; page++) {
-        const pageUrl = page === 1 ? src.listUrl : `${src.listUrl}?page=${page}`;
-        fetches.push(
-          fetchText(pageUrl).then((html) => ({ dealType: src.dealType, source: src.name, html }))
-        );
-      }
+  for (const src of PROPERTY_SOURCES) {
+    for (let page = 1; page <= PROPERTY_PAGES_PER_SOURCE; page++) {
+      const pageUrl = page === 1 ? src.listUrl : `${src.listUrl}?page=${page}`;
+      fetches.push(
+        fetchText(pageUrl).then((html) => ({ dealType: src.dealType, source: src.name, html }))
+      );
     }
-
-    const pages = await Promise.allSettled(fetches);
-    const now = Date.now();
-    const mergedById = new Map<string, PropertyListing>();
-    const pendingEnrichment: PropertyListing[] = [];
-
-    for (const result of pages) {
-      if (result.status !== "fulfilled" || !result.value.html) continue;
-      const { dealType, source, html } = result.value;
-
-      for (const card of parseListPage(html)) {
-        const city = extractCity(card.region);
-        if (!city || city.toLowerCase() !== PROPERTY_CITY_FILTER.toLowerCase()) continue;
-
-        const id = `${source}::${card.externalId}`;
-        if (mergedById.has(id)) continue;
-
-        const previous = previousById.get(id);
-        const detailUrl = sanitizeLink(new URL(card.detailPath, "https://bahu.ly").toString());
-        if (!detailUrl) continue;
-
-        const listing: PropertyListing = {
-          id,
-          title: card.title,
-          propertyType: classifyType(card.rawType),
-          dealType,
-          region: card.region,
-          city,
-          price: card.price,
-          areaSqm: card.areaSqm,
-          bedrooms: card.bedrooms,
-          bathrooms: card.bathrooms,
-          imageUrl: previous?.imageUrl ?? null,
-          description: previous?.description ?? null,
-          source,
-          sourceUrl: detailUrl,
-          lastSeenAtMs: now,
-          lastUpdatedLabel: formatUpdatedLabel(now),
-        };
-
-        mergedById.set(id, listing);
-        if (!previous || !previous.imageUrl) pendingEnrichment.push(listing);
-      }
-    }
-
-    const toEnrich = pendingEnrichment.slice(0, PROPERTY_MAX_DETAIL_ENRICHMENTS_PER_CYCLE);
-    const enrichmentResults = await Promise.allSettled(
-      toEnrich.map(async (listing) => ({ id: listing.id, enrichment: await fetchDetailEnrichment(listing.sourceUrl) }))
-    );
-
-    for (const result of enrichmentResults) {
-      if (result.status !== "fulfilled") continue;
-      const listing = mergedById.get(result.value.id);
-      if (!listing) continue;
-      listing.imageUrl = result.value.enrichment.imageUrl;
-      listing.description = result.value.enrichment.description;
-    }
-
-    if (mergedById.size > 0) {
-      const merged = [...mergedById.values()];
-      cache = merged;
-      lastCollectedAtMs = now;
-      writeCacheToDisk(merged);
-    }
-    // لا نتائج على الإطلاق في هذه الدورة (كل المصادر فشلت أو لا اتصال) → نحتفظ بالكاش القديم كما هو، بلا أي فراغ مفاجئ.
-  } catch {
-    // أي خطأ غير متوقَّع في الدورة بأكملها يُبتلَع صامتًا — لا يؤثر على المنصة ولا على الكاش الحالي.
-  } finally {
-    collectionInFlight = false;
   }
+
+  const pages = await Promise.allSettled(fetches);
+  const now = Date.now();
+  const mergedById = new Map<string, PropertyListing>();
+
+  for (const result of pages) {
+    if (result.status !== "fulfilled" || !result.value.html) continue;
+    const { dealType, source, html } = result.value;
+
+    for (const card of parseListPage(html)) {
+      const city = extractCity(card.region);
+      if (!city || city.toLowerCase() !== PROPERTY_CITY_FILTER.toLowerCase()) continue;
+
+      const id = `${source}::${card.externalId}`;
+      if (mergedById.has(id)) continue;
+
+      const previous = previousById.get(id);
+      const detailUrl = sanitizeLink(new URL(card.detailPath, "https://bahu.ly").toString());
+      if (!detailUrl) continue;
+
+      mergedById.set(id, {
+        id,
+        title: card.title,
+        propertyType: classifyType(card.rawType),
+        dealType,
+        region: card.region,
+        city,
+        price: card.price,
+        areaSqm: card.areaSqm,
+        bedrooms: card.bedrooms,
+        bathrooms: card.bathrooms,
+        imageUrl: previous?.imageUrl ?? null,
+        description: previous?.description ?? null,
+        source,
+        sourceUrl: detailUrl,
+        lastSeenAtMs: now,
+        lastUpdatedLabel: formatUpdatedLabel(now),
+      });
+    }
+  }
+
+  if (mergedById.size > 0) {
+    const merged = [...mergedById.values()];
+    cache = merged;
+    lastCollectedAtMs = now;
+    writeCacheToDisk(merged);
+    return merged;
+  }
+  // لا نتائج على الإطلاق في هذه الدورة (كل المصادر فشلت أو لا اتصال) → نحتفظ بالكاش القديم كما هو، بلا أي فراغ مفاجئ.
+  return cache;
+}
+
+/**
+ * إثراء الصور/الأوصاف (صفحات تفاصيل إضافية) — عملية أبطأ بطبيعتها، لذلك لا
+ * يُنتظِرها أي طلب مستخدم أبدًا (تبقى fire-and-forget دائمًا)، بخلاف
+ * fetchAndMergeListings التي يمكن انتظارها عند الحاجة. غيابها لا يعني غياب
+ * السعر/العنوان/المنطقة — هذه الحقول تصل من الجزء السريع أعلاه دائمًا.
+ */
+async function enrichImages(items: PropertyListing[]): Promise<void> {
+  const pending = items.filter((item) => !item.imageUrl).slice(0, PROPERTY_MAX_DETAIL_ENRICHMENTS_PER_CYCLE);
+  if (pending.length === 0) return;
+
+  const results = await Promise.allSettled(
+    pending.map(async (listing) => ({ id: listing.id, enrichment: await fetchDetailEnrichment(listing.sourceUrl) }))
+  );
+
+  let changed = false;
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    const listing = cache.find((item) => item.id === result.value.id);
+    if (!listing) continue;
+    listing.imageUrl = result.value.enrichment.imageUrl;
+    listing.description = result.value.enrichment.description;
+    changed = true;
+  }
+  if (changed) writeCacheToDisk(cache);
+}
+
+/**
+ * دورة تحديث واحدة لهذه النسخة: تنتظر فقط الجزء السريع (fetchAndMergeListings)
+ * ثم تُطلق إثراء الصور في الخلفية بلا انتظار. استدعاء متزامن أثناء دورة
+ * جارية يحصل على نفس الـPromise بدل بدء دورة جديدة موازية.
+ */
+function runCollectionCycle(): Promise<void> {
+  if (collectionInFlightPromise) return collectionInFlightPromise;
+
+  collectionInFlightPromise = (async () => {
+    try {
+      const merged = await fetchAndMergeListings();
+      void enrichImages(merged);
+    } catch {
+      // أي خطأ غير متوقَّع في الدورة بأكملها يُبتلَع صامتًا — لا يؤثر على المنصة ولا على الكاش الحالي.
+    } finally {
+      collectionInFlightPromise = null;
+    }
+  })();
+
+  return collectionInFlightPromise;
 }
 
 /** يبدأ المُجمِّع الخلفي مرة واحدة فقط لكل عملية تشغيل للخادم — استدعاء متكرر آمن (idempotent). */
@@ -359,12 +390,18 @@ function matchesFilters(item: PropertyListing, filters: PropertyFilters): boolea
 }
 
 /**
- * تُعيد صفحة من العقارات المطابقة للفلاتر — قراءة فورية من الكاش الحالي في
- * الذاكرة فقط، بلا أي انتظار شبكي مهما كان. تُشغّل المُجمِّع الخلفي إن لم
- * يكن قد بدأ (شبكة أمان إضافية بجانب src/instrumentation.ts).
+ * تُعيد صفحة من العقارات المطابقة للفلاتر. إن كانت الذاكرة تحتوي عقارات
+ * فعلًا (نسخة دافئة، كما كان الحال محليًا دائمًا) تُعاد فورًا بلا أي انتظار
+ * شبكي. فقط حين تكون الذاكرة فارغة تمامًا (أول طلب على نسخة جديدة — هذا
+ * بالضبط سبب اختفاء النتائج على نشر Vercel: النسخ المعزولة لا تضمن استمرار
+ * setInterval/الذاكرة بين الطلبات) تنتظر الجزء السريع من دورة تحديث واحدة
+ * فقط (بلا انتظار إثراء الصور) قبل الإعادة.
  */
-export function getProperties(filters: PropertyFilters): PropertySearchResult {
+export async function getProperties(filters: PropertyFilters): Promise<PropertySearchResult> {
   ensureBackgroundCollectorStarted();
+  if (cache.length === 0) {
+    await runCollectionCycle();
+  }
 
   const matched = cache.filter((item) => matchesFilters(item, filters));
   const total = matched.length;
@@ -372,6 +409,7 @@ export function getProperties(filters: PropertyFilters): PropertySearchResult {
   const page = Math.min(Math.max(1, filters.page), totalPages);
   const start = (page - 1) * PROPERTY_PAGE_SIZE;
   const items = matched.slice(start, start + PROPERTY_PAGE_SIZE);
+  const isStale = lastCollectedAtMs !== null && Date.now() - lastCollectedAtMs > PROPERTY_REFRESH_INTERVAL_MS * 2;
 
   return {
     items,
@@ -380,14 +418,20 @@ export function getProperties(filters: PropertyFilters): PropertySearchResult {
     pageSize: PROPERTY_PAGE_SIZE,
     totalPages,
     lastCollectedLabel: lastCollectedAtMs ? formatUpdatedLabel(lastCollectedAtMs) : null,
+    hasAnyProperties: cache.length > 0,
+    isStale,
   };
 }
 
 /**
  * تُعيد عقارًا واحدًا لصفحة تفاصيله. يقبل المعرّف الكامل (source::externalId)
- * أو externalId فقط (كما يظهر في رابط الصفحة) — لا تنتظر شبكة، تقرأ الكاش الحالي فقط.
+ * أو externalId فقط (كما يظهر في رابط الصفحة). نفس منطق الانتظار عند
+ * الذاكرة الفارغة المستخدَم في getProperties أعلاه.
  */
-export function getPropertyById(id: string): PropertyListing | null {
+export async function getPropertyById(id: string): Promise<PropertyListing | null> {
   ensureBackgroundCollectorStarted();
+  if (cache.length === 0) {
+    await runCollectionCycle();
+  }
   return cache.find((item) => item.id === id || item.id.endsWith(`::${id}`)) ?? null;
 }

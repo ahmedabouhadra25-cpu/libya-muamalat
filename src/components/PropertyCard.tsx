@@ -14,7 +14,7 @@ const TYPE_LABELS: Record<PropertyListing["propertyType"], string> = {
 };
 
 function formatPrice(price: number | null): string {
-  if (price === null) return "السعر غير محدد";
+  if (price === null) return "السعر غير معلن";
   return `${price.toLocaleString("ar-LY")} د.ل`;
 }
 
