@@ -13,7 +13,7 @@ import { NEWS_MIN_ITEMS_TO_SHOW } from "@/lib/news/config";
 export const runtime = "nodejs";
 
 export async function GET() {
-  const items = getLibyaNews();
+  const items = await getLibyaNews();
   const exchangeRates = await getExchangeRates();
 
   if (items.length < NEWS_MIN_ITEMS_TO_SHOW) {

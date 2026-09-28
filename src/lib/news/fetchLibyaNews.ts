@@ -21,7 +21,7 @@ import type { NewsCategory, NewsItem } from "@/lib/news/types";
 
 let rollingItems: NewsItem[] = [];
 let backgroundStarted = false;
-let refreshInFlight = false;
+let refreshInFlightPromise: Promise<void> | null = null;
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
@@ -200,25 +200,36 @@ function mergeIntoRolling(newItems: NewsItem[]): void {
   rollingItems = trimmed.map((item, index) => ({ ...item, isBreaking: index === 0 }));
 }
 
-/** دورة تحديث واحدة: كل مصدر فاشل لا يُسقط الباقي، ولا تتزاحم دورتان في نفس اللحظة. */
-async function runRefreshCycle(): Promise<void> {
-  if (refreshInFlight) return;
-  refreshInFlight = true;
-  try {
-    const results = await Promise.allSettled(NEWS_SOURCES.map((source) => fetchOneSource(source)));
-    const newItems = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
-    mergeIntoRolling(newItems);
-  } catch {
-    // أي خطأ غير متوقَّع في الدورة بأكملها يُبتلَع صامتًا — لا يؤثر على المنصة ولا على الكاش الحالي.
-  } finally {
-    refreshInFlight = false;
-  }
+/**
+ * دورة تحديث واحدة: كل مصدر فاشل لا يُسقط الباقي (Promise.allSettled)، ولا
+ * تتزاحم دورتان في نفس اللحظة لهذه النسخة — أي استدعاء يصل أثناء دورة قائمة
+ * يحصل على نفس الـPromise الجارية بدل بدء دورة جديدة، حتى تنتظر كل الطلبات
+ * المتزامنة (مثل طلبين وصلا معًا على نسخة Serverless بلا أخبار في الذاكرة)
+ * نتيجة الدورة الحقيقية نفسها بدل أن يُرجع أحدهما نتيجة فارغة قبل اكتمالها.
+ */
+function runRefreshCycle(): Promise<void> {
+  if (refreshInFlightPromise) return refreshInFlightPromise;
+
+  refreshInFlightPromise = (async () => {
+    try {
+      const results = await Promise.allSettled(NEWS_SOURCES.map((source) => fetchOneSource(source)));
+      const newItems = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+      mergeIntoRolling(newItems);
+    } catch {
+      // أي خطأ غير متوقَّع في الدورة بأكملها يُبتلَع صامتًا — لا يؤثر على المنصة ولا على الكاش الحالي.
+    } finally {
+      refreshInFlightPromise = null;
+    }
+  })();
+
+  return refreshInFlightPromise;
 }
 
 /**
  * يبدأ جالب الأخبار الخلفي (Background Fetcher) مرة واحدة فقط لكل تشغيل
- * للخادم — استدعاء متكرر آمن (idempotent). التحديث بعدها يعمل بمعزل تام عن
- * أي طلب مستخدم: لا صفحة رئيسية ولا /api/news نفسها تنتظر أي جلب شبكي.
+ * للخادم — استدعاء متكرر آمن (idempotent). دورات التحديث الدورية بعدها
+ * (setInterval) تعمل بمعزل تام عن أي طلب مستخدم فور توفر أخبار في الذاكرة؛
+ * فقط أول طلب على ذاكرة فارغة تمامًا ينتظر دورة واحدة فعليًا — انظر getLibyaNews.
  */
 export function ensureNewsBackgroundStarted(): void {
   if (backgroundStarted) return;
@@ -231,12 +242,20 @@ export function ensureNewsBackgroundStarted(): void {
 }
 
 /**
- * تُعيد القائمة الرولينج الحالية فورًا — قراءة من الذاكرة فقط، بلا أي انتظار
- * شبكي مهما كان. تُشغّل الجالب الخلفي إن لم يكن قد بدأ (شبكة أمان إضافية
- * بجانب src/instrumentation.ts). فارغة فقط إن لم تنجح أي دورة تحديث منذ
- * إقلاع الخادم على الإطلاق.
+ * تُعيد القائمة الرولينج الحالية. إن كانت الذاكرة تحتوي أخبارًا فعلًا (النسخة
+ * "دافئة" ولو من دورة خلفية سابقة) تُعاد فورًا بلا أي انتظار شبكي، كما كانت
+ * دائمًا. فقط حين تكون الذاكرة فارغة تمامًا (أول طلب على نسخة جديدة، أو نسخة
+ * Serverless معزولة لم تُنهِ أي دورة خلفية بعد — هذا هو سبب ظهور القائمة
+ * فارغة على النشر الحقيقي كما وُثِّق في التشخيص) تنتظر دورة تحديث حقيقية
+ * واحدة (بنفس مهلة NEWS_FETCH_TIMEOUT_MS الحالية) قبل الإعادة، بدل إرجاع
+ * مصفوفة فارغة فورًا. لا تُخترَع أي بيانات: إذا فشلت كل المصادر في هذه
+ * الدورة أيضًا، تبقى النتيجة فارغة بصدق (يُترجمها route.ts إلى حالة "غير
+ * متاحة" واضحة، لا محاولة تمويه).
  */
-export function getLibyaNews(): NewsItem[] {
+export async function getLibyaNews(): Promise<NewsItem[]> {
   ensureNewsBackgroundStarted();
+  if (rollingItems.length === 0) {
+    await runRefreshCycle();
+  }
   return rollingItems;
 }
