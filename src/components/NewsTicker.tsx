@@ -1,7 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { NEWS_TICKER_CLIENT_POLL_MS, NEWS_TICKER_SPEED_SECONDS } from "@/lib/news/config";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  NEWS_TICKER_CLIENT_POLL_MS,
+  NEWS_TICKER_MAX_DURATION_SECONDS,
+  NEWS_TICKER_MIN_DURATION_SECONDS,
+  NEWS_TICKER_PIXELS_PER_SECOND,
+} from "@/lib/news/config";
 import type { ExchangeRate, NewsCategory, NewsItem } from "@/lib/news/types";
 
 const CATEGORY_ICON: Record<NewsCategory, string> = {
@@ -30,14 +35,51 @@ function sameByKey<T>(a: T[] | null, b: T[], keyOf: (item: T) => string): boolea
 }
 
 /**
- * شريط أخبار عاجلة + اقتصادية + نفط وطاقة + (عند توفّرها) أسعار صرف — معزول
- * تمامًا: كل CSS بأسماء بادئة libya-news-ticker-، وكل منطق الجلب في وحدة
- * مستقلة (src/lib/news/*) لا تلمس أي ملف آخر من المنصة. لا JavaScript
- * لتحريك الشريط نفسه (CSS فقط)؛ JS يُستخدَم فقط لجلب/تحديث البيانات دوريًا.
+ * يقيس عرض المحتوى الحقيقي المُصيَّر (نصف عرض المسار المُضاعَف = دورة واحدة
+ * كاملة) ويحسب مدة الحركة بحيث تبقى سرعة القراءة (بكسل/ثانية) ثابتة تقريبًا
+ * بصرف النظر عن عدد/طول العناوين — بدل مدة ثابتة تجعل الأخبار الطويلة
+ * سريعة الحركة وغير مقروءة. يُعاد الحساب عند تغيّر المحتوى أو حجم النافذة.
+ */
+function useAutoDuration(itemCount: number): [React.RefObject<HTMLDivElement | null>, number] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [duration, setDuration] = useState(NEWS_TICKER_MIN_DURATION_SECONDS);
+
+  const recompute = useCallback(() => {
+    const track = ref.current;
+    if (!track) return;
+    const singleSetWidth = track.scrollWidth / 2;
+    if (singleSetWidth <= 0) return;
+    const seconds = singleSetWidth / NEWS_TICKER_PIXELS_PER_SECOND;
+    setDuration(
+      Math.min(NEWS_TICKER_MAX_DURATION_SECONDS, Math.max(NEWS_TICKER_MIN_DURATION_SECONDS, seconds))
+    );
+  }, []);
+
+  useEffect(() => {
+    recompute();
+    const track = ref.current;
+    if (!track || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(recompute);
+    observer.observe(track);
+    return () => observer.disconnect();
+    // itemCount يُدرَج عمدًا لإعادة الحساب عند تغيّر عدد/محتوى العناوين، حتى لو ظل عرض العنصر نفسه غير متغيّر لحظيًا.
+  }, [recompute, itemCount]);
+
+  return [ref, duration];
+}
+
+/**
+ * شريط أخبار متحرك باستمرار (يمين → يسار، RTL حقيقي) بأسلوب شرائط الأخبار
+ * التلفزيونية: عناوين حقيقية من src/lib/news/* فقط (لا بيانات وهمية)، حلقة
+ * لا نهائية سلسة بلا فراغ أو قفزة عند الرجوع للعنوان الأول، وسرعة تتكيّف مع
+ * طول المحتوى الفعلي. معزول تمامًا: كل CSS بأسماء بادئة libya-news-ticker-،
+ * وكل منطق الجلب في وحدة مستقلة لا تلمس أي ملف آخر من المنصة. لا JavaScript
+ * لتحريك الشريط نفسه (CSS فقط)؛ JS يُستخدَم فقط لجلب البيانات وقياس عرضها.
  */
 export function NewsTicker() {
   const [items, setItems] = useState<NewsItem[] | null>(null);
   const [exchangeRates, setExchangeRates] = useState<ExchangeRate[]>([]);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +106,8 @@ export function NewsTicker() {
         }
       } catch {
         // فشل صامت — يبقى آخر محتوى معروض كما هو، بلا أي خطأ ظاهر للمستخدم.
+      } finally {
+        if (!cancelled) setHasLoadedOnce(true);
       }
     }
 
@@ -75,9 +119,15 @@ export function NewsTicker() {
     };
   }, []);
 
-  if (!items || items.length === 0) return null;
-  const loopedItems = [...items, ...items];
+  const loopedItems = items ? [...items, ...items] : [];
   const loopedRates = exchangeRates.length > 0 ? [...exchangeRates, ...exchangeRates] : [];
+  const [newsTrackRef, newsDuration] = useAutoDuration(items?.length ?? 0);
+  const [ratesTrackRef, ratesDuration] = useAutoDuration(exchangeRates.length);
+
+  // لا شيء بعد أول محاولة جلب (حالة تحميل أولى قصيرة) — لا نعرض شريطًا فارغًا لحظيًا.
+  if (!hasLoadedOnce && !items) return null;
+
+  const hasNews = items !== null && items.length > 0;
 
   return (
     <div dir="rtl" className="libya-news-ticker flex flex-col bg-[#0a2540] text-white">
@@ -86,7 +136,7 @@ export function NewsTicker() {
         .libya-news-ticker-track {
           display: flex;
           width: max-content;
-          animation: libya-news-ticker-scroll var(--libya-news-ticker-duration, 45s) ease-in-out infinite alternate;
+          animation: libya-news-ticker-scroll var(--libya-news-ticker-duration, 45s) linear infinite;
         }
         @keyframes libya-news-ticker-scroll {
           from { transform: translateX(0); }
@@ -103,31 +153,39 @@ export function NewsTicker() {
 
       <div className="flex items-stretch">
         <span className="flex shrink-0 items-center gap-1 bg-[#CE1126] px-3 py-1.5 text-xs font-bold sm:px-4 sm:text-sm">
-          عاجل <span className="hidden sm:inline">| آخر الأخبار الليبية</span>
+          أخبار ليبيا <span className="hidden sm:inline">| آخر الأخبار</span>
         </span>
-        <div className="libya-news-ticker-viewport min-w-0 flex-1">
-          <div
-            className="libya-news-ticker-track"
-            style={{ "--libya-news-ticker-duration": `${NEWS_TICKER_SPEED_SECONDS}s` } as React.CSSProperties}
-          >
-            {loopedItems.map((item, index) => (
-              <a
-                key={`${item.id}-${index}`}
-                href={item.link}
-                target="_blank"
-                rel="noopener noreferrer nofollow"
-                className="flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-1.5 text-xs text-slate-100 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 sm:text-sm"
-              >
-                <span aria-hidden="true">{itemIcon(item)}</span>
-                {item.isTripoli && <span aria-hidden="true">📍</span>}
-                <span className="font-semibold text-sky-300">{item.source}</span>
-                <span>{item.title}</span>
-                {item.publishedLabel && <span className="text-slate-400">· {item.publishedLabel}</span>}
-                <span aria-hidden="true" className="text-slate-500">•</span>
-              </a>
-            ))}
+
+        {hasNews ? (
+          <div className="libya-news-ticker-viewport min-w-0 flex-1">
+            <div
+              ref={newsTrackRef}
+              className="libya-news-ticker-track"
+              style={{ "--libya-news-ticker-duration": `${newsDuration}s` } as React.CSSProperties}
+            >
+              {loopedItems.map((item, index) => (
+                <a
+                  key={`${item.id}-${index}`}
+                  href={item.link}
+                  target="_blank"
+                  rel="noopener noreferrer nofollow"
+                  className="flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-1.5 text-xs text-slate-100 transition hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 sm:text-sm"
+                >
+                  <span aria-hidden="true">{itemIcon(item)}</span>
+                  {item.isTripoli && <span aria-hidden="true">📍</span>}
+                  <span className="font-semibold text-sky-300">{item.source}</span>
+                  <span>{item.title}</span>
+                  {item.publishedLabel && <span className="text-slate-400">· {item.publishedLabel}</span>}
+                  <span aria-hidden="true" className="text-slate-500">•</span>
+                </a>
+              ))}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex min-w-0 flex-1 items-center px-4 py-1.5 text-xs text-slate-400 sm:text-sm">
+            الأخبار غير متاحة حاليًا
+          </div>
+        )}
       </div>
 
       {loopedRates.length > 0 && (
@@ -137,8 +195,9 @@ export function NewsTicker() {
           </span>
           <div className="libya-news-ticker-viewport min-w-0 flex-1">
             <div
+              ref={ratesTrackRef}
               className="libya-news-ticker-track"
-              style={{ "--libya-news-ticker-duration": `${NEWS_TICKER_SPEED_SECONDS}s` } as React.CSSProperties}
+              style={{ "--libya-news-ticker-duration": `${ratesDuration}s` } as React.CSSProperties}
             >
               {loopedRates.map((rate, index) => (
                 <span

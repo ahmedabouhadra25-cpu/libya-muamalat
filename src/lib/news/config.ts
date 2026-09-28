@@ -44,10 +44,15 @@ export const NEWS_SOURCES = [
 ] as const;
 
 /**
- * سرعة حركة الشريط — متغيّر واحد فقط. رقم أكبر = حركة أبطأ (ثوانٍ لعبور
- * دورة كاملة).
+ * سرعة قراءة ثابتة تقريبًا (بكسل/ثانية) تُستخدَم لحساب مدة عبور دورة كاملة
+ * من عرض المحتوى الفعلي المُصيَّر (NewsTicker.tsx) — بدل مدة ثابتة تجعل
+ * العناوين الطويلة سريعة الحركة وغير مقروءة.
  */
-export const NEWS_TICKER_SPEED_SECONDS = 45;
+export const NEWS_TICKER_PIXELS_PER_SECOND = 90;
+
+/** أدنى/أقصى مدة (ثانية) لعبور دورة كاملة، بصرف النظر عن طول المحتوى. */
+export const NEWS_TICKER_MIN_DURATION_SECONDS = 20;
+export const NEWS_TICKER_MAX_DURATION_SECONDS = 180;
 
 /** كل كم تسأل الواجهة خادمنا (/api/news) عن نسخة محدَّثة — لا علاقة بالمصادر الخارجية مباشرة. */
 export const NEWS_TICKER_CLIENT_POLL_MS = 5 * 60 * 1000;
